@@ -17,11 +17,12 @@ NmcliPath = "nmcli"
 IpPath = "ip"
 ResolvectlPath = "resolvectl"
 
-# Where zapret's own init script lives. The "DPI" button in the DNS panel runs
-# it with "start" and "stop" to turn the DPI bypass on and off (see net_dpi.c).
-# zapret's installer puts the script under /opt/zapret; point this elsewhere if
-# it was unpacked somewhere else. When the script is not there the button is
-# drawn as unavailable and does nothing.
+# Where zapret's own init script lives. The "DPI: Open" button on the DEVICES
+# panel — beside "DNS" on the button bar — runs it with "start" and "stop" to
+# turn the DPI bypass on and off (see net_dpi.c). zapret's installer puts the
+# script under /opt/zapret; point this elsewhere if it was unpacked somewhere
+# else. When the script is not there the button is drawn as unavailable and
+# does nothing.
 DpiInitPath = "/opt/zapret/init.d/sysv/zapret"
 
 # The program the "Open Wi-Fi" button runs. The wifi manager is the program that
