@@ -79,17 +79,26 @@ static void spawn_command(const char *command) {
 
     pid_t pid = fork();
     if (pid == 0) {
+        if (setsid() < 0) {
+            _exit(127);
+        }
+        pid_t worker = fork();
+        if (worker < 0) {
+            _exit(127);
+        }
+        if (worker > 0) {
+            _exit(0);
+        }
         execvp(argv[0], argv);
         _exit(127);
     }
-    /* The zombie is reaped here rather than waited for: the manager keeps
-       running while the wifi window is open, so it cannot block on it. */
     if (pid > 0) {
-        /* SIGCHLD default action is to reap children only when the parent
-           waits; a non-blocking wait here catches the immediate failures and
-           leaves the long-running window to be reaped when it exits. */
         int status = 0;
-        waitpid(pid, &status, WNOHANG);
+        while (waitpid(pid, &status, 0) < 0) {
+            if (errno != EINTR) {
+                break;
+            }
+        }
     }
 }
 

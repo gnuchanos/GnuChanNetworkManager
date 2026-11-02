@@ -24,6 +24,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -158,9 +159,15 @@ static int run_sudo(int argc, char **argv, const char *password) {
     close(pipe_to_stdin[1]);
 
     int status = 0;
-    waitpid(pid, &status, 0);
+    pid_t waited;
+    do {
+        waited = waitpid(pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
     free(command);
 
+    if (waited != pid) {
+        return -1;
+    }
     if (WIFEXITED(status)) {
         return WEXITSTATUS(status);
     }
@@ -237,9 +244,15 @@ static int run_sudo_in_terminal(int argc, char **argv) {
     }
 
     int status = 0;
-    waitpid(pid, &status, 0);
+    pid_t waited;
+    do {
+        waited = waitpid(pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
     free(command);
 
+    if (waited != pid) {
+        return -1;
+    }
     if (WIFEXITED(status)) {
         return WEXITSTATUS(status);
     }

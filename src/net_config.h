@@ -10,7 +10,7 @@
  * file can hold without a display. Only code with a connection to the server
  * turns a name into a pixel, and that is net_style.c.
  *
- *     ~/.config/GnuChanNetworkManager/config.py
+ *     ~/.config/GnuChanNetworkManager/config.conf
  *
  *     NmcliPath    = "nmcli"
  *     IpPath       = "ip"
@@ -96,8 +96,9 @@ void net_config_defaults(NetConfig *config);
 int net_config_load(NetConfig *config, const char *path);
 
 /* Where the file is looked for:
-   $XDG_CONFIG_HOME/GnuChanNetworkManager/config.py, or
-   ~/.config/GnuChanNetworkManager/config.py. Written into buffer, returned. */
+   $XDG_CONFIG_HOME/GnuChanNetworkManager/config.conf, or
+   ~/.config/GnuChanNetworkManager/config.conf. A legacy config.py is read
+   when no .conf exists. Written into buffer, returned. */
 char *net_config_path(char *buffer, unsigned int size);
 
 #endif /* GNUCHANNET_CONFIG_H */

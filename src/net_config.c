@@ -7,12 +7,32 @@
  * nobody needed. A `#` begins a comment; a value may be wrapped in quotes and
  * they are stripped when they match at both ends.
  */
+#define _POSIX_C_SOURCE 200809L
+
 #include "net_config.h"
 
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+static void restrict_commands_for_sudo(NetConfig *config) {
+    if (geteuid() != 0 || getuid() == 0) {
+        return;
+    }
+
+    /* The elevated copy still reads the caller's config file. */
+    snprintf(config->nmcli, sizeof(config->nmcli), "nmcli");
+    snprintf(config->ip, sizeof(config->ip), "ip");
+    snprintf(config->resolvectl, sizeof(config->resolvectl), "resolvectl");
+    snprintf(config->dpi_init, sizeof(config->dpi_init),
+             "/opt/zapret/init.d/sysv/zapret");
+    snprintf(config->wifi_manager, sizeof(config->wifi_manager),
+             "GnuChanWifi");
+    setenv("PATH",
+           "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", 1);
+}
 
 void net_config_defaults(NetConfig *config) {
     memset(config, 0, sizeof(*config));
@@ -140,13 +160,31 @@ static void apply_setting(NetConfig *config, const char *name,
 char *net_config_path(char *buffer, unsigned int size) {
     const char *xdg = getenv("XDG_CONFIG_HOME");
     if (xdg && xdg[0]) {
+        snprintf(buffer, size, "%s/GnuChanNetworkManager/config.conf", xdg);
+        if (access(buffer, R_OK) == 0) {
+            return buffer;
+        }
         snprintf(buffer, size, "%s/GnuChanNetworkManager/config.py", xdg);
+        if (access(buffer, R_OK) == 0) {
+            return buffer;
+        }
+        snprintf(buffer, size, "%s/GnuChanNetworkManager/config.conf", xdg);
         return buffer;
     }
     const char *home = getenv("HOME");
     if (home && home[0]) {
-        snprintf(buffer, size, "%s/.config/GnuChanNetworkManager/config.py",
-                 home);
+        snprintf(buffer, size,
+                 "%s/.config/GnuChanNetworkManager/config.conf", home);
+        if (access(buffer, R_OK) == 0) {
+            return buffer;
+        }
+        snprintf(buffer, size,
+                 "%s/.config/GnuChanNetworkManager/config.py", home);
+        if (access(buffer, R_OK) == 0) {
+            return buffer;
+        }
+        snprintf(buffer, size,
+                 "%s/.config/GnuChanNetworkManager/config.conf", home);
         return buffer;
     }
     buffer[0] = '\0';
@@ -155,6 +193,7 @@ char *net_config_path(char *buffer, unsigned int size) {
 
 int net_config_load(NetConfig *config, const char *path) {
     net_config_defaults(config);
+    restrict_commands_for_sudo(config);
 
     if (!path || !path[0]) {
         snprintf(config->error, sizeof(config->error),
@@ -223,5 +262,6 @@ int net_config_load(NetConfig *config, const char *path) {
         snprintf(config->title, sizeof(config->title), "Network");
     }
 
+    restrict_commands_for_sudo(config);
     return 0;
 }

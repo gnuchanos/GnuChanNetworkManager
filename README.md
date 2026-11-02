@@ -17,7 +17,11 @@ The makefile installs the build dependencies with apt-get, compiles the sources,
 and re-runs itself through sudo to write into `/usr/local/bin`. The binary goes
 to `/usr/local/bin/GnuChanNetworkManager`; a desktop entry is written to
 `/usr/share/applications/gnuchannetworkmanager.desktop`; the settings file goes
-under `~/.config/GnuChanNetworkManager/`.
+under `~/.config/GnuChanNetworkManager/config.conf`. Settings use plain
+`Key = value` lines, with `#` comments. Existing `config.py` files remain
+readable as legacy text and are never run as Python.
+When the manager is launched through `sudo`, configurable executable paths are
+replaced with the system defaults before any network action is run.
 
 The makefile takes an action as its first argument: `install` (the default),
 `build`, `run`, `list`, `uninstall`, `zapret-install` and `zapret-remove`.
