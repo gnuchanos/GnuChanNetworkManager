@@ -33,12 +33,33 @@
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/select.h>
+#include <sys/time.h>
+
 #include "net_draw.h"
 #include "net_ui.h"
+#include "gnuchan_lang.h"
 
 #define NET_EVENT_MASK (KeyPressMask | ButtonPressMask | ButtonReleaseMask | \
                         PointerMotionMask | StructureNotifyMask | \
                         ExposureMask)
+
+#define NET_ZAPRET_LOCK "/var/lock/gnuchan-zapret-manager.lock"
+
+static int zapret_operation_running(void) {
+    int fd = open(NET_ZAPRET_LOCK, O_RDWR);
+    if (fd < 0) {
+        return 0;
+    }
+    int locked = (flock(fd, LOCK_EX | LOCK_NB) != 0);
+    if (!locked) {
+        flock(fd, LOCK_UN);
+    }
+    close(fd);
+    return locked;
+}
 
 /* --- running the wifi manager -------------------------------------------- */
 
@@ -158,7 +179,7 @@ static void work_out_size(NetUi *ui) {
     int body_rows;
 
     if (ui->mode == NET_MODE_DPI) {
-        body_rows = 5;
+        body_rows = 14; /* status + log panel */
     } else {
         body_rows = ui->config.running_rows;
     }
@@ -170,8 +191,8 @@ static void work_out_size(NetUi *ui) {
 }
 
 static void resize_for_mode(NetUi *ui) {
-    int min_width = ui->screen_width < 520 ? ui->screen_width : 520;
-    int min_height = (ui->mode == NET_MODE_DPI ? 9 : 5) *
+    int min_width = ui->screen_width < 760 ? ui->screen_width : 760;
+    int min_height = (ui->mode == NET_MODE_DPI ? 18 : 5) *
                      ui->style.row_height + ui->style.padding;
     if (min_width < 1) {
         min_width = 1;
@@ -246,15 +267,15 @@ static void do_toggle(NetUi *ui) {
     char name[NET_TEXT];
     snprintf(name, sizeof(name), "%s", device->name);
 
-    snprintf(ui->status, sizeof(ui->status), "Bringing %s %s…",
-             name, up ? "up" : "down");
+    snprintf(ui->status, sizeof(ui->status), gnuchan_lang_t("net_status_bringing"),
+             name, gnuchan_lang_t(up ? "net_word_up" : "net_word_down"));
     net_draw(ui);
 
     char error[NET_TEXT];
     if (net_device_set_up(&ui->config, name, up, error, sizeof(error)) == 0) {
         refresh_devices(ui);
-        snprintf(ui->status, sizeof(ui->status), "%s is now %s",
-                 name, up ? "up" : "down");
+        snprintf(ui->status, sizeof(ui->status), gnuchan_lang_t("net_status_is_now"),
+                 name, gnuchan_lang_t(up ? "net_word_up" : "net_word_down"));
     } else {
         snprintf(ui->status, sizeof(ui->status), "%s", error);
     }
@@ -265,15 +286,13 @@ static void do_wifi(NetUi *ui) {
     char link[NET_TEXT];
     net_device_first_wifi(&ui->devices, link, sizeof(link));
     if (!link[0]) {
-        snprintf(ui->status, sizeof(ui->status),
-                 "No wireless adapter was found, so there is nothing for the "
-                 "wifi manager to open");
+        snprintf(ui->status, sizeof(ui->status), "%s",
+                 gnuchan_lang_t("net_status_no_wifi_adapter"));
         net_draw(ui);
         return;
     }
     spawn_command(ui->config.wifi_manager);
-    snprintf(ui->status, sizeof(ui->status),
-             "Opened the wifi manager for %s", link);
+    snprintf(ui->status, sizeof(ui->status), gnuchan_lang_t("net_status_wifi_opened"), link);
     net_draw(ui);
 }
 
@@ -286,25 +305,26 @@ static void do_wifi(NetUi *ui) {
    button shows what is, not what was asked for. */
 static void do_dpi(NetUi *ui) {
     if (!ui->dpi_available) {
-        snprintf(ui->status, sizeof(ui->status),
-                 "No DPI bypass is installed; install zapret to switch one on");
+        snprintf(ui->status, sizeof(ui->status), "%s",
+                 gnuchan_lang_t("net_status_dpi_not_installed"));
         net_draw(ui);
         return;
     }
 
     int wanted = !ui->dpi_active;
-    snprintf(ui->status, sizeof(ui->status), "%s the DPI bypass…",
-             wanted ? "Starting" : "Stopping");
+    snprintf(ui->status, sizeof(ui->status), "%s",
+             gnuchan_lang_t(wanted ? "net_status_dpi_starting" : "net_status_dpi_stopping"));
     net_draw(ui);
 
     char error[NET_TEXT];
     if (net_dpi_set(&ui->config, wanted, error, sizeof(error)) == 0) {
         refresh_dpi(ui);
         if (ui->dpi_active) {
-            snprintf(ui->status, sizeof(ui->status),
-                     "The DPI bypass is on — blocked sites now open everywhere");
+            snprintf(ui->status, sizeof(ui->status), "%s",
+                     gnuchan_lang_t("net_status_dpi_on"));
         } else {
-            snprintf(ui->status, sizeof(ui->status), "The DPI bypass is off");
+            snprintf(ui->status, sizeof(ui->status), "%s",
+                     gnuchan_lang_t("net_status_dpi_off"));
         }
     } else {
         refresh_dpi(ui);
@@ -335,32 +355,38 @@ static void dispatch_action(NetUi *ui, NetAction action) {
         break;
     case NET_ACTION_DPI_INSTALL:
         refresh_dpi(ui);
-        if (ui->dpi_available) {
-            snprintf(ui->status, sizeof(ui->status),
-                     "Zapret is already installed.");
+        if (zapret_operation_running()) {
+            snprintf(ui->status, sizeof(ui->status), "%s",
+                     gnuchan_lang_t("net_status_op_running"));
+        } else if (ui->dpi_available) {
+            snprintf(ui->status, sizeof(ui->status), "%s",
+                     gnuchan_lang_t("net_status_zapret_already"));
         } else {
             if (spawn_zapret_manager("zapret-install") == 0) {
-                snprintf(ui->status, sizeof(ui->status),
-                         "Installer started. Check /var/log/gnuchan-zapret-manager.log.");
+                snprintf(ui->status, sizeof(ui->status), "%s",
+                         gnuchan_lang_t("net_status_install_started"));
             } else {
-                snprintf(ui->status, sizeof(ui->status),
-                         "Could not start the installer; root access and the helper are required.");
+                snprintf(ui->status, sizeof(ui->status), "%s",
+                         gnuchan_lang_t("net_status_install_failed"));
             }
         }
         net_draw(ui);
         break;
     case NET_ACTION_DPI_REMOVE:
         refresh_dpi(ui);
-        if (!ui->dpi_available) {
-            snprintf(ui->status, sizeof(ui->status),
-                     "Zapret is not installed.");
+        if (zapret_operation_running()) {
+            snprintf(ui->status, sizeof(ui->status), "%s",
+                     gnuchan_lang_t("net_status_op_running"));
+        } else if (!ui->dpi_available) {
+            snprintf(ui->status, sizeof(ui->status), "%s",
+                     gnuchan_lang_t("net_status_zapret_not_installed"));
         } else {
             if (spawn_zapret_manager("zapret-remove") == 0) {
-                snprintf(ui->status, sizeof(ui->status),
-                         "Removal started. Check /var/log/gnuchan-zapret-manager.log.");
+                snprintf(ui->status, sizeof(ui->status), "%s",
+                         gnuchan_lang_t("net_status_remove_started"));
             } else {
-                snprintf(ui->status, sizeof(ui->status),
-                         "Could not start removal; root access and the helper are required.");
+                snprintf(ui->status, sizeof(ui->status), "%s",
+                         gnuchan_lang_t("net_status_remove_failed"));
             }
         }
         net_draw(ui);
@@ -376,7 +402,8 @@ static void dispatch_action(NetUi *ui, NetAction action) {
         ui->status[0] = '\0';
         if (ui->mode == NET_MODE_DPI) {
             refresh_dpi(ui);
-            snprintf(ui->status, sizeof(ui->status), "DPI status refreshed.");
+            snprintf(ui->status, sizeof(ui->status), "%s",
+                     gnuchan_lang_t("net_status_dpi_refreshed"));
         } else {
             refresh_devices(ui);
         }
@@ -636,49 +663,82 @@ int net_ui_run(NetUi *ui) {
     }
 
     Atom wm_delete = XInternAtom(ui->display, "WM_DELETE_WINDOW", False);
+    int xfd = ConnectionNumber(ui->display);
+    int tick = 0;
 
     while (ui->running) {
-        XEvent event;
-        XNextEvent(ui->display, &event);
+        while (XPending(ui->display) > 0) {
+            XEvent event;
+            XNextEvent(ui->display, &event);
 
-        switch (event.type) {
-        case KeyPress:
-            handle_key(ui, &event.xkey);
-            break;
-        case ButtonPress:
-            handle_click(ui, &event.xbutton);
-            break;
-        case MotionNotify:
-            handle_motion(ui, &event.xmotion);
-            break;
-        case Expose:
-            if (event.xexpose.window == ui->window &&
-                event.xexpose.count == 0) {
-                net_draw(ui);
-            }
-            break;
-        case ConfigureNotify:
-            if (event.xconfigure.window == ui->window) {
-                if (event.xconfigure.width != ui->width ||
-                    event.xconfigure.height != ui->height) {
-                    ui->width = event.xconfigure.width;
-                    ui->height = event.xconfigure.height;
+            switch (event.type) {
+            case KeyPress:
+                handle_key(ui, &event.xkey);
+                break;
+            case ButtonPress:
+                handle_click(ui, &event.xbutton);
+                break;
+            case MotionNotify:
+                handle_motion(ui, &event.xmotion);
+                break;
+            case Expose:
+                if (event.xexpose.window == ui->window &&
+                    event.xexpose.count == 0) {
                     net_draw(ui);
                 }
+                break;
+            case ConfigureNotify:
+                if (event.xconfigure.window == ui->window) {
+                    if (event.xconfigure.width != ui->width ||
+                        event.xconfigure.height != ui->height) {
+                        ui->width = event.xconfigure.width;
+                        ui->height = event.xconfigure.height;
+                        net_draw(ui);
+                    }
+                }
+                break;
+            case ClientMessage:
+                if ((Atom)event.xclient.data.l[0] == wm_delete) {
+                    ui->running = 0;
+                }
+                break;
+            case DestroyNotify:
+                if (event.xdestroywindow.window == ui->window) {
+                    ui->running = 0;
+                }
+                break;
+            default:
+                break;
             }
+        }
+
+        if (!ui->running) {
             break;
-        case ClientMessage:
-            if ((Atom)event.xclient.data.l[0] == wm_delete) {
-                ui->running = 0;
+        }
+
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(xfd, &readfds);
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 400000; /* 400ms: responsive UI + periodic status updates */
+        int ready = select(xfd + 1, &readfds, NULL, NULL, &tv);
+        if (ready == 0) {
+            tick++;
+            /* Refresh state periodically so install/remove/start progress is
+               visible without manual refresh spam. */
+            if ((tick % 4) == 0) { /* ~1.6s */
+                int busy = zapret_operation_running();
+                if (busy && ui->mode == NET_MODE_DPI && ui->status[0] == '\0') {
+                    snprintf(ui->status, sizeof(ui->status), "%s",
+                             gnuchan_lang_t("net_status_op_progress"));
+                }
+                refresh_dpi(ui);
+                if (ui->mode == NET_MODE_DEVICES && (tick % 8) == 0) {
+                    refresh_devices(ui);
+                }
+                net_draw(ui);
             }
-            break;
-        case DestroyNotify:
-            if (event.xdestroywindow.window == ui->window) {
-                ui->running = 0;
-            }
-            break;
-        default:
-            break;
         }
     }
 

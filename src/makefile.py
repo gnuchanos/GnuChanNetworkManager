@@ -38,6 +38,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import platform
 import shutil
@@ -46,6 +47,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import urllib.request
 from pathlib import Path
 
@@ -64,6 +66,7 @@ PROGRAM = "GnuChanNetworkManager"
 BIN_DIR = Path("/usr/local/bin")
 LIBEXEC_DIR = Path("/usr/local/libexec")
 ZAPRET_MANAGER = LIBEXEC_DIR / "gnuchan-zapret-manager"
+ZAPRET_LOCK = Path("/var/lock/gnuchan-zapret-manager.lock")
 
 # The desktop entry, which is what makes the manager FINDABLE. GnuChanRunner and
 # any applications menu read the .desktop files under /usr/share/applications,
@@ -72,7 +75,7 @@ APPS_DIR = Path("/usr/share/applications")
 DESKTOP_FILE = APPS_DIR / "gnuchannetworkmanager.desktop"
 
 # The settings file, installed into the user's own config directory.
-CONFIG_SOURCE = ROOT / "GnuChanNetworkManager_config" / "config.conf"
+CONFIG_SOURCE = ROOT / "config" / "config.conf"
 CONFIG_DIR_NAME = "GnuChanNetworkManager"
 CONFIG_FILE_NAME = "config.conf"
 
@@ -116,12 +119,23 @@ ZAPRET_TARBALL = (
 # The names blockcheck is run against to find a working bypass. updates.discord
 # is first because it is the host the Discord installer actually fetches from,
 # and the one observed being reset HERE: its name resolves correctly but the TLS
-# handshake is cut, which is exactly the case a DPI desync is for.
-BLOCKCHECK_DOMAINS = ("updates.discord.com", "discord.com", "instagram.com",
-                      "youtube.com", "x.com", "tiktok.com")
-# Used when blockcheck finds no nfqws method at all. The reference's own
-# --dev default, and a desync that works on many networks.
-FALLBACK_NFQWS_OPT = "--dpi-desync=fake --dpi-desync-ttl=3"
+# handshake is cut, which is exactly the case a DPI desync is for. Roblox and a
+# few common services are included so the chosen strategy is tested against them
+# too.
+BLOCKCHECK_DOMAINS = (
+    "updates.discord.com", "discord.com",
+    "www.roblox.com", "api.roblox.com", "roblox.com",
+    "instagram.com", "youtube.com", "x.com", "tiktok.com",
+)
+# Used when blockcheck finds no nfqws method at all. Prefer a broad strategy
+# that works on many networks, including cases like Roblox where simple fake/ttl
+# may be insufficient. Includes UDP/QUIC (443) handling to reduce partial loads.
+FALLBACK_NFQWS_OPT = (
+    "--filter-tcp=80,443 --dpi-desync=fake,split2 "
+    "--dpi-desync-split-pos=1,midsld --dpi-desync-fake-tls=0x00000000 "
+    "--dpi-desync-ttl=5 --dpi-desync-repeats=8 --dpi-desync-fooling=md5sig,badseq "
+    "--new --filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6"
+)
 
 # blockcheck works through dozens of desync methods against the network, so it
 # runs for minutes. This ceiling stops it ever sitting there forever, and its
@@ -442,43 +456,54 @@ def set_config_variable(name: str, value: str) -> bool:
 
 def write_nfqws_opt(method: str) -> None:
     """Write the chosen desync into the config and bring the service up so it
-    is live."""
-    if set_config_variable("NFQWS_OPT", f"{method} <HOSTLIST>"):
-        detail(f"bypass method set: {method}")
+    is live. If UDP 443 is enabled for nfqws, append QUIC/UDP handling so queued
+    UDP packets are processed consistently."""
+    opt = method.strip()
+    if "NFQWS_PORTS_UDP" in (run(["grep", "-q", "^NFQWS_PORTS_UDP=\\\"443\\\"", str(ZAPRET_DIR / "config")], capture=True).returncode == 0 and "443" or ""):
+        pass
+    # Read configured UDP port to decide whether to append UDP filter.
+    udp_enabled = False
+    try:
+        cfg = (ZAPRET_DIR / "config").read_text(encoding="utf-8", errors="replace")
+        for line in cfg.splitlines():
+            if line.startswith("NFQWS_PORTS_UDP="):
+                udp_enabled = "443" in line
+                break
+    except OSError:
+        udp_enabled = False
+    if udp_enabled and "--filter-udp=" not in opt:
+        opt = f"{opt} --new --filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=6"
+    if set_config_variable("NFQWS_OPT", f"{opt} <HOSTLIST>"):
+        detail(f"bypass method set: {opt}")
     start_bypass()
 
 
 def enable_dpi_in_config() -> None:
-    """Turn the bypass ON in zapret's config — the switch that decides whether
-    the daemon is launched at all.
+    """Turn the bypass ON in zapret's config and ensure firewall rules are applied.
 
-    THIS IS THE REASON THE DPI BUTTON DID NOTHING. install_easy.sh is
-    interactive, and the config it ships (config.default) has
-    `NFQWS_ENABLE=0`: the installer asks "enable nfqws ?" and its answer is
-    taken from that value, i.e. NO. The bootstrap here feeds that installer a
-    fixed string of answers, and the question does not sit at a fixed place -
-    the prompts before it (the firewall type, IPv6, whether the system is
-    virtualised, the filter mode, the two tpws modes) depend on the machine.
-    When a fed answer does not land on it, nfqws is left disabled. The bypass
-    is then INSTALLED AND NEVER STARTED: the DPI button runs zapret's init
-    script, the script reads NFQWS_ENABLE=0 and launches no daemon, so the
-    button looks like it does nothing at all. Writing the desync (NFQWS_OPT)
-    is not enough for the same reason - an option for a daemon that never
-    starts changes nothing.
-
-    So the two settings the feature actually depends on are written here,
-    deterministically, rather than left to where an answer happened to land:
-
-      NFQWS_ENABLE=1   run the nfqws daemon - the switch for the whole feature;
-      MODE_FILTER=none send every connection on the redirected ports through it,
-                       which is the "blocked sites open everywhere" the button
-                       promises, rather than only names on a hostlist this
-                       image does not carry.
+    Without INIT_APPLY_FW=1 the init script may start nfqws but never install
+    nftables/iptables NFQUEUE rules, so packets never reach the daemon. NFQWS
+    port/packet settings are required for zapret to generate nfqueue rules.
     """
     if set_config_variable("NFQWS_ENABLE", "1"):
         detail("nfqws is enabled in the config")
     if set_config_variable("MODE_FILTER", "none"):
         detail("the bypass applies to all redirected traffic (MODE_FILTER=none)")
+    if set_config_variable("INIT_APPLY_FW", "1"):
+        detail("firewall rules will be applied by zapret (INIT_APPLY_FW=1)")
+    # Ports/packet counts drive nfqws firewall rule generation.
+    if set_config_variable("NFQWS_PORTS_TCP", "80,443"):
+        detail("nfqws TCP ports set to 80,443")
+    if set_config_variable("NFQWS_PORTS_UDP", "443"):
+        detail("nfqws UDP port set to 443 (QUIC/HTTP3)")
+    if set_config_variable("NFQWS_TCP_PKT_OUT", "20"):
+        detail("nfqws TCP outgoing packet count set")
+    if set_config_variable("NFQWS_TCP_PKT_IN", "10"):
+        detail("nfqws TCP incoming packet count set")
+    if set_config_variable("NFQWS_UDP_PKT_OUT", "20"):
+        detail("nfqws UDP outgoing packet count set")
+    if set_config_variable("NFQWS_UDP_PKT_IN", "0"):
+        detail("nfqws UDP incoming packet count set")
 
 
 def choose_and_apply_bypass_method() -> None:
@@ -537,8 +562,8 @@ def install_zapret() -> bool:
     the init script ended up in place."""
     step("Installing zapret (the DPI bypass the DPI button switches)")
     # What zapret's nfqws needs to sit in the packet path, plus the tools its
-    # installer itself calls.
-    apt_install(("nftables", "iptables", "curl", "wget", "tar", "gzip", "jq"))
+    # installer and blockcheck use (dnsutils provides nslookup/host for tests).
+    apt_install(("nftables", "iptables", "curl", "wget", "tar", "gzip", "jq", "dnsutils"))
 
     work = Path(tempfile.mkdtemp(prefix="gnuchan-zapret-"))
     tarball = work / f"zapret-v{ZAPRET_VERSION}.tar.gz"
@@ -574,6 +599,36 @@ def install_zapret() -> bool:
     return dpi_installed()
 
 
+def acquire_zapret_lock():
+    """Prevent concurrent zapret install/remove/configure runs.
+
+    Concurrent runs can fight over apt/dpkg, /opt/zapret, and service state,
+    which looks like a stuck or "locked" operation in the UI.
+    """
+    ZAPRET_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    fd = open(ZAPRET_LOCK, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fd.close()
+        return None
+    fd.seek(0)
+    fd.truncate()
+    fd.write(str(os.getpid()))
+    fd.flush()
+    return fd
+
+
+def release_zapret_lock(fd) -> None:
+    if not fd:
+        return
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    fd.close()
+
+
 def ensure_dpi_dependency() -> None:
     """Make sure zapret is installed AND that its config holds a desync that
     actually works on this network.
@@ -597,6 +652,20 @@ def ensure_dpi_dependency() -> None:
     configure_dpi_bypass()
 
 
+def apply_bypass_firewall() -> None:
+    """Ensure NFQUEUE firewall rules are installed."""
+    if not ZAPRET_INIT.is_file():
+        return
+    # Prefer explicit firewall apply; some installs don't set INIT_APPLY_FW.
+    result = run(["sh", str(ZAPRET_INIT), "restart-fw"], cwd=ZAPRET_DIR, capture=True)
+    if result.returncode != 0:
+        result = run(["sh", str(ZAPRET_INIT), "start-fw"], cwd=ZAPRET_DIR, capture=True)
+    if result.returncode == 0:
+        detail("zapret firewall rules applied")
+    else:
+        detail("could not apply zapret firewall rules; check /var/log/gnuchan-zapret-manager.log")
+
+
 def configure_dpi_bypass() -> None:
     """Choose this network's working desync, write it into the config, and
     confirm the daemon came up. Separate from the install so it runs even when
@@ -611,6 +680,7 @@ def configure_dpi_bypass() -> None:
     # had disabled.
     enable_dpi_in_config()
     choose_and_apply_bypass_method()
+    apply_bypass_firewall()
 
     if shutil.which("pgrep") is not None:
         probe = run(["pgrep", "-x", "nfqws"], capture=True)
@@ -878,11 +948,25 @@ def main() -> int:
         ensure_root()
 
     if action == "zapret-install":
-        ensure_dpi_dependency()
-        return 0 if dpi_installed() else 1
+        lock_fd = acquire_zapret_lock()
+        if lock_fd is None:
+            detail("another zapret install/remove is already running")
+            return 1
+        try:
+            ensure_dpi_dependency()
+            return 0 if dpi_installed() else 1
+        finally:
+            release_zapret_lock(lock_fd)
 
     if action == "zapret-remove":
-        return 0 if remove_zapret() else 1
+        lock_fd = acquire_zapret_lock()
+        if lock_fd is None:
+            detail("another zapret install/remove is already running")
+            return 1
+        try:
+            return 0 if remove_zapret() else 1
+        finally:
+            release_zapret_lock(lock_fd)
 
     if action == "uninstall":
         uninstall()

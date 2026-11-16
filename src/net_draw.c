@@ -24,8 +24,13 @@
  */
 #include "net_draw.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/file.h>
+#include <unistd.h>
+
+#include "gnuchan_lang.h"
 
 /* --- geometry, shared by the drawing and the input ------------------------ */
 
@@ -107,8 +112,7 @@ typedef struct NetButtonDef {
     NetAction action;
 } NetButtonDef;
 
-/* The buttons, per mode. One table so a button's label and its action are
-   written together and cannot drift apart. */
+/* The buttons, per mode. Labels are localized at draw/layout time. */
 static const NetButtonDef kDeviceButtons[] = {
     { "Up/Down",    NET_ACTION_TOGGLE  },
     { "Open Wi-Fi", NET_ACTION_WIFI    },
@@ -128,18 +132,29 @@ static const NetButtonDef kDpiButtons[] = {
 #define DPI_BUTTON_COUNT \
     ((int)(sizeof(kDpiButtons) / sizeof(kDpiButtons[0])))
 
-/* The label a button actually shows. Every button uses its table label except
-   the DNS panel's Secure DNS toggle, whose word follows the state — so the
-   layout and the drawing must ask here rather than read the table directly, or
-   the box would be sized for "off" while drawn as "on" and the text would
-   overrun it. */
 static const char *button_label(const NetUi *ui, const NetButtonDef *table,
                                 int index) {
-    if (table == kDpiButtons && index == 2) {
-        return ui->dpi_active ? "Disable DPI" : "Enable DPI";
+    if (table == kDpiButtons) {
+        if (index == 2) {
+            return ui->dpi_active ? gnuchan_lang_t("net_btn_disable_dpi")
+                                  : gnuchan_lang_t("net_btn_enable_dpi");
+        }
+        switch (table[index].action) {
+        case NET_ACTION_DPI_INSTALL: return gnuchan_lang_t("net_btn_install_zapret");
+        case NET_ACTION_DPI_REMOVE:  return gnuchan_lang_t("net_btn_remove_zapret");
+        case NET_ACTION_REFRESH:     return gnuchan_lang_t("net_btn_refresh");
+        case NET_ACTION_BACK:        return gnuchan_lang_t("net_btn_back");
+        default: break;
+        }
+    } else {
+        switch (table[index].action) {
+        case NET_ACTION_TOGGLE:      return gnuchan_lang_t("net_btn_up_down");
+        case NET_ACTION_WIFI:        return gnuchan_lang_t("net_btn_open_wifi");
+        case NET_ACTION_DPI_SETTINGS:return gnuchan_lang_t("net_btn_dpi_settings");
+        case NET_ACTION_REFRESH:     return gnuchan_lang_t("net_btn_refresh");
+        default: break;
+        }
     }
-    /* A toggle's label follows its state, so its button stays correctly sized
-       and says what the next click will do. */
     return table[index].label;
 }
 
@@ -236,8 +251,9 @@ static void draw_status_bar(NetUi *ui) {
     fill(ui, ui->style.panel, 0, 0, ui->width, height);
 
     int x = ui->style.padding;
-    text(ui, x, band_baseline(ui, 0), ui->config.title, ui->style.accent);
-    x += net_style_text_width(ui->display, ui->style.font, ui->config.title)
+    const char *title = ui->config.title[0] ? ui->config.title : gnuchan_lang_t("net_title");
+    text(ui, x, band_baseline(ui, 0), title, ui->style.accent);
+    x += net_style_text_width(ui->display, ui->style.font, title)
          + ui->style.padding * 2;
 
     /* A one-line summary of the machine, so the state is readable without
@@ -250,12 +266,12 @@ static void draw_status_bar(NetUi *ui) {
     }
     char summary[NET_TEXT * 2];
     if (ui->devices.count == 0) {
-        snprintf(summary, sizeof(summary), "no interfaces were read");
+        snprintf(summary, sizeof(summary), "%s", gnuchan_lang_t("net_no_interfaces_read"));
     } else if (connected == 0) {
-        snprintf(summary, sizeof(summary), "%d interface(s), none connected",
+        snprintf(summary, sizeof(summary), gnuchan_lang_t("net_interfaces_none_connected"),
                  ui->devices.count);
     } else {
-        snprintf(summary, sizeof(summary), "%d interface(s), %d connected",
+        snprintf(summary, sizeof(summary), gnuchan_lang_t("net_interfaces_connected"),
                  ui->devices.count, connected);
     }
     text(ui, x, band_baseline(ui, 0), summary, ui->style.text_muted);
@@ -302,15 +318,15 @@ static void draw_kind(NetUi *ui, NetDeviceKind kind, int x, int y,
    it could not be read. */
 static const char *state_word(const NetDevice *device) {
     if (device->state == 1) {
-        return "connected";
+        return gnuchan_lang_t("net_state_connected");
     }
     if (device->state == 0 && device->up) {
-        return "up";
+        return gnuchan_lang_t("net_state_up");
     }
     if (device->state == 0) {
-        return "disconnected";
+        return gnuchan_lang_t("net_state_disconnected");
     }
-    return device->up ? "up" : "";
+    return device->up ? gnuchan_lang_t("net_state_up") : "";
 }
 
 static void draw_devices(NetUi *ui) {
@@ -318,7 +334,7 @@ static void draw_devices(NetUi *ui) {
 
     if (ui->devices.count == 0) {
         text(ui, ui->style.padding, band_baseline(ui, top),
-             "No interfaces were found (nmcli and ip both gave nothing)",
+             gnuchan_lang_t("net_no_interfaces"),
              ui->style.text_muted);
         return;
     }
@@ -420,33 +436,128 @@ static void draw_status_line(NetUi *ui) {
 }
 
 static void draw_help(NetUi *ui) {
-    const char *help;
-    if (ui->mode == NET_MODE_DPI) {
-        help = "Enter enable/disable   i install   u remove   r refresh   Escape back";
-    } else {
-        help = "Up/Down move   Enter up/down   w wifi   p DPI settings   "
-               "r refresh   Escape close";
-    }
+    const char *help = (ui->mode == NET_MODE_DPI)
+        ? gnuchan_lang_t("net_help_dpi")
+        : gnuchan_lang_t("net_help_devices");
     int descent = ui->style.font ? ui->style.font->descent : 4;
     text(ui, ui->style.padding, help_y(ui) + row_height(ui) - descent - 2,
          help, ui->style.text_muted);
 }
 
+static int dpi_busy_draw(void) {
+    int fd = open("/var/lock/gnuchan-zapret-manager.lock", O_RDWR);
+    if (fd < 0) {
+        return 0;
+    }
+    int locked = (flock(fd, LOCK_EX | LOCK_NB) != 0);
+    if (!locked) {
+        flock(fd, LOCK_UN);
+    }
+    close(fd);
+    return locked;
+}
+
+static void draw_log_panel(NetUi *ui, int x, int y, int width, int height) {
+    fill(ui, ui->style.field, x, y, width, height);
+    outline(ui, ui->style.panel_edge, x, y, width, height);
+
+    int line = row_height(ui);
+    int inner_x = x + ui->style.padding;
+    int title_y = y + ui->style.padding / 2;
+    int inner_w = width - 2 * ui->style.padding;
+    if (inner_w < 20) inner_w = 20;
+
+    char title[256];
+    snprintf(title, sizeof(title), "%s  (/var/log/gnuchan-zapret-manager.log)",
+             gnuchan_lang_t("net_live_output"));
+    text(ui, inner_x, band_baseline(ui, title_y), title, ui->style.accent);
+    int sep_y = title_y + line;
+    fill(ui, ui->style.panel_edge, x + 1, sep_y, width - 2, 2);
+
+    int inner_y = sep_y + ui->style.padding / 2;
+    const char *path = "/var/log/gnuchan-zapret-manager.log";
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        text(ui, inner_x, band_baseline(ui, inner_y),
+             gnuchan_lang_t("net_log_not_created"), ui->style.text_muted);
+        return;
+    }
+    char lines[20][512];
+    int count = 0;
+    while (fgets(lines[count % 20], (int)sizeof(lines[0]), f)) {
+        char *nl = strchr(lines[count % 20], '\n');
+        if (nl) *nl = '\0';
+        count++;
+    }
+    fclose(f);
+
+    int max_lines = (y + height - inner_y - ui->style.padding / 2) / line;
+    if (max_lines < 1) max_lines = 1;
+    if (max_lines > 14) max_lines = 14;
+    int show = count < max_lines ? count : max_lines;
+    int start = count - show;
+    if (show == 0) {
+        text(ui, inner_x, band_baseline(ui, inner_y),
+             gnuchan_lang_t("net_waiting_output"), ui->style.text_muted);
+        return;
+    }
+    for (int i = 0; i < show; i++) {
+        char fitted[512];
+        const char *src = lines[(start + i) % 20];
+        net_style_fit(ui->display, ui->style.font, src, inner_w, fitted, sizeof(fitted));
+        text(ui, inner_x, band_baseline(ui, inner_y), fitted, ui->style.text);
+        inner_y += line;
+    }
+}
+
 static void draw_dpi(NetUi *ui) {
-    int x = ui->style.padding;
+    int pad = ui->style.padding;
+    int x = pad;
     int y = body_top_y(ui);
     int line = row_height(ui);
-    text(ui, x, band_baseline(ui, y),
-         ui->dpi_available ? "Zapret is installed." : "Zapret is not installed.",
-         ui->dpi_available ? ui->style.connected : ui->style.text_muted);
-    y += line + ui->style.padding;
-    text(ui, x, band_baseline(ui, y),
-         ui->dpi_active ? "DPI bypass is enabled." : "DPI bypass is disabled.",
-         ui->dpi_active ? ui->style.connected : ui->style.text_muted);
-    y += line + ui->style.padding;
-    text(ui, x, band_baseline(ui, y),
-         "Details: /var/log/gnuchan-zapret-manager.log",
-         ui->style.text_muted);
+    int busy = dpi_busy_draw();
+    int right = ui->width - pad;
+    int content_w = right - x;
+    if (content_w < 100) content_w = 100;
+
+    /* Header/status card */
+    int header_h = line * 3 + pad * 2;
+    fill(ui, ui->style.panel, x, y, content_w, header_h);
+    outline(ui, ui->style.panel_edge, x, y, content_w, header_h);
+
+    int tx = x + pad;
+    int ty = y + pad / 2;
+    text(ui, tx, band_baseline(ui, ty), gnuchan_lang_t("net_dpi_pro_title"),
+         ui->style.accent);
+
+    char state[256];
+    snprintf(state, sizeof(state), "%s: %s   |   %s: %s",
+             gnuchan_lang_t("net_zapret"),
+             gnuchan_lang_t(ui->dpi_available ? "net_installed" : "net_not_installed"),
+             gnuchan_lang_t("net_bypass"),
+             gnuchan_lang_t(ui->dpi_active ? "net_on" : "net_off"));
+    ty += line;
+    text(ui, tx, band_baseline(ui, ty), state,
+         (ui->dpi_available && ui->dpi_active) ? ui->style.connected : ui->style.text);
+
+    char op[256];
+    snprintf(op, sizeof(op), "%s: %s %s",
+             gnuchan_lang_t("net_operation"),
+             gnuchan_lang_t(busy ? "net_running" : "net_idle"),
+             busy ? gnuchan_lang_t("net_auto_refreshing") : "");
+    ty += line;
+    text(ui, tx, band_baseline(ui, ty), op,
+         busy ? ui->style.accent : ui->style.text_muted);
+
+    y += header_h + pad;
+
+    /* Log panel occupies remaining body area, never overflows into foot */
+    int log_h = body_bottom_y(ui) - y - pad / 2;
+    if (log_h < line * 5) log_h = line * 5;
+    if (y + log_h > body_bottom_y(ui)) log_h = body_bottom_y(ui) - y;
+    if (log_h > 0) {
+        draw_log_panel(ui, x, y, content_w, log_h);
+    }
 }
 
 /* --- the frame ------------------------------------------------------------ */

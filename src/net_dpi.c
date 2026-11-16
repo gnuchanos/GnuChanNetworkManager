@@ -89,12 +89,16 @@ int net_dpi_set(const NetConfig *config, int on, char *error,
     char quoted[NET_TEXT * 2];
     net_shell_quote(script, quoted, sizeof(quoted));
 
-    char command[NET_TEXT * 4];
-    snprintf(command, sizeof(command), "%s %s", quoted,
-             on ? "start" : "stop");
+    /* Start/stop daemon and explicitly apply/remove firewall rules. Some setups
+       do not have INIT_APPLY_FW enabled, which leaves nfqws running but no
+       packets queued. */
+    char command[NET_TEXT * 6];
+    if (on) {
+        snprintf(command, sizeof(command), "%s start && %s start-fw", quoted, quoted);
+    } else {
+        snprintf(command, sizeof(command), "%s stop-fw; %s stop", quoted, quoted);
+    }
 
-    /* The script narrates what it does on both streams; they are joined by
-       net_shell_run(), so the first line of a refusal is what is shown. */
     static char output[NET_TEXT * 4];
     if (net_shell_run(command, output, sizeof(output)) != 0) {
         if (error && size) {

@@ -78,7 +78,11 @@ int net_shell_run(const char *command, char *out, unsigned int size) {
        not answer, and the window stays alive. timeout is coreutils and is on
        every Debian. */
     const char *prefix = net_shell_have("timeout") ? "timeout 20 " : "";
-    snprintf(line, sizeof(line), "%s%s > %s 2>&1", prefix, command, path);
+    int wrote = snprintf(line, sizeof(line), "%s%s > %s 2>&1", prefix, command, path);
+    if (wrote < 0 || (size_t)wrote >= sizeof(line)) {
+        unlink(path);
+        return 127;
+    }
 
     int status = system(line);
 
